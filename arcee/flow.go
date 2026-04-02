@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"arcee/yydsmail"
@@ -79,7 +80,9 @@ func WaitForVerifyLink(
 	pollTimeout time.Duration,
 ) (*yydsmail.Message, string, error) {
 	deadline := time.Now().Add(pollTimeout)
+	attempt := 0
 	for {
+		attempt++
 		pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		list, err := client.ListMessages(pollCtx, yydsmail.MessageQuery{
 			Address: address,
@@ -90,8 +93,23 @@ func WaitForVerifyLink(
 			return nil, "", err
 		}
 
-		for _, msg := range list.Messages {
+		debugf("poll attempt=%d address=%s messages=%d unread=%d\n", attempt, address, len(list.Messages), list.UnreadCount)
+		for _, summary := range list.Messages {
+			debugf("poll message id=%s subject=%q created_at=%s\n", summary.ID, summary.Subject, summary.CreatedAt)
+
+			msg := summary
+			detailCtx, detailCancel := context.WithTimeout(ctx, 30*time.Second)
+			detail, detailErr := client.GetMessage(detailCtx, summary.ID, address)
+			detailCancel()
+			if detailErr != nil {
+				debugf("poll detail_error id=%s err=%v\n", summary.ID, detailErr)
+			} else if detail != nil {
+				msg = *detail
+				debugf("poll detail_loaded id=%s text=%t html=%t\n", msg.ID, msg.PrimaryText() != "", msg.PrimaryHTML() != "")
+			}
+
 			if link := msg.ExtractVerifyEmailLink(); link != "" {
+				debugf("poll verify_link_found id=%s\n", msg.ID)
 				return &msg, link, nil
 			}
 		}
@@ -102,6 +120,13 @@ func WaitForVerifyLink(
 
 		time.Sleep(pollInterval)
 	}
+}
+
+func debugf(format string, args ...any) {
+	if os.Getenv("ARCEE_DEBUG") != "1" {
+		return
+	}
+	fmt.Printf(format, args...)
 }
 
 func ConfirmLink(ctx context.Context, httpClient *http.Client, link string) (int, error) {

@@ -29,6 +29,7 @@ type Config struct {
 	Login              *bool  `json:"login"`
 	SkipSignup         *bool  `json:"skip_signup"`
 	DumpMessages       *bool  `json:"dump_messages"`
+	Debug              *bool  `json:"debug"`
 }
 
 func main() {
@@ -66,7 +67,6 @@ func main() {
 		if identity.Email == "" {
 			log.Fatal("config.address is required when skip_signup is true")
 		}
-		fmt.Printf("skip_signup email=%s\n", identity.Email)
 	} else {
 		signupResp, err := arcee.ProvisionAndSignupFlow(
 			ctx,
@@ -80,14 +80,16 @@ func main() {
 			log.Fatal(err)
 		}
 		identity = signupResp.Identity
-		fmt.Printf("signup_ok status=%d\n", signupResp.Response.StatusCode)
-		fmt.Printf("identity first_name=%s last_name=%s email=%s password=%s\n", identity.FirstName, identity.LastName, identity.Email, identity.Password)
-		if len(signupResp.Response.Body) > 0 {
+		fmt.Printf("signup email=%s\n", identity.Email)
+		fmt.Printf("password=%s\n", identity.Password)
+		if cfg.DebugEnabled() && len(signupResp.Response.Body) > 0 {
+			fmt.Printf("signup_ok status=%d\n", signupResp.Response.StatusCode)
+			fmt.Printf("identity first_name=%s last_name=%s email=%s password=%s\n", identity.FirstName, identity.LastName, identity.Email, identity.Password)
 			fmt.Printf("signup_response=%s\n", arcee.CompactJSON(signupResp.Response.Body))
 		}
 	}
 
-	msg, link, err := arcee.WaitForVerifyLink(
+	_, link, err := arcee.WaitForVerifyLink(
 		ctx,
 		mailClient,
 		identity.Email,
@@ -98,8 +100,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	fmt.Printf("message_id=%s subject=%q from=%s\n", msg.ID, msg.Subject, msg.SenderAddress())
 	fmt.Printf("verify_link=%s\n", link)
 
 	if cfg.ConfirmEnabled() {
@@ -107,7 +107,10 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Printf("verify_status=%d\n", status)
+		fmt.Printf("verified status=%d\n", status)
+		if cfg.DebugEnabled() {
+			fmt.Printf("verify_status=%d\n", status)
+		}
 	}
 
 	if cfg.LoginEnabled() {
@@ -118,10 +121,8 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Printf("login_status=%d\n", loginResp.Response.StatusCode)
-		if len(loginResp.Response.Body) > 0 {
-			fmt.Printf("login_response=%s\n", arcee.CompactJSON(loginResp.Response.Body))
-		}
+		printLoginResult(loginResp)
+		return
 	}
 }
 
@@ -180,6 +181,10 @@ func (c *Config) DumpMessagesEnabled() bool {
 	return boolOrDefault(c.DumpMessages, false)
 }
 
+func (c *Config) DebugEnabled() bool {
+	return boolOrDefault(c.Debug, false)
+}
+
 func boolOrDefault(value *bool, fallback bool) bool {
 	if value != nil {
 		return *value
@@ -236,5 +241,18 @@ func printMessage(msg yydsmail.Message) {
 	}
 	if link := msg.ExtractVerifyEmailLink(); link != "" {
 		fmt.Printf("verify_link=%s\n", link)
+	}
+}
+
+func printLoginResult(loginResp *arcee.LoginResult) {
+	if loginResp == nil || len(loginResp.Response.Body) == 0 {
+		return
+	}
+
+	var payload struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(loginResp.Response.Body, &payload); err == nil && payload.AccessToken != "" {
+		fmt.Printf("access_token=%s\n", payload.AccessToken)
 	}
 }
