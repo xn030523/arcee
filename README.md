@@ -46,8 +46,14 @@ go run . -mode serve
 默认监听：
 
 ```text
-http://127.0.0.1:8787
+http://0.0.0.0:8787
 ```
+
+说明：
+
+- `0.0.0.0` 只表示服务监听所有网卡
+- 本机访问仍可用 `127.0.0.1`
+- 远程访问应使用服务器真实 IP 或域名
 
 ---
 
@@ -175,7 +181,7 @@ Copy-Item config.json.ex config.json
   },
   "server": {
     "access_token": "",
-    "listen": "127.0.0.1:8787",
+    "listen": "0.0.0.0:8787",
     "openai_api_key": "daiju",
     "base_model_name": "trinity-large-thinking",
     "enabled_tools": [
@@ -288,11 +294,49 @@ curl http://127.0.0.1:8787/v1/chat/completions `
 
 ## 工具支持
 
-当前工具兼容走最小实现，核心是：
+当前工具兼容不是简单透传，而是在网关层实现了一套最小 OpenAI tools 闭环。
 
-- `web_search`
+当前行为：
 
-也就是说，项目当前更偏向“可用代理层”，不是完整的 OpenAI Tools 协议镜像。
+- 当请求里带 `tools` 且当前还没有 `tool` 消息时
+- 网关会先让 Arcee 产出工具决策
+- 如果模型决定调用工具，且工具属于本地支持集合，网关会直接执行再继续生成最终答案
+- 如果工具不属于本地支持集合，网关会返回标准 OpenAI `tool_calls`
+- 如果消息里已经包含 `tool` 结果，网关会继续生成最终回答
+
+当前支持的相关字段：
+
+- `tools`
+- `tool_choice`
+- `messages[].tool_calls`
+- `messages[].tool_call_id`
+
+注意：
+
+- 这部分是兼容层自行实现的，不是 Arcee 网页接口原生暴露的标准协议
+- 目标是让 OpenAI 风格客户端能走通工具调用流程
+- 目前仍然属于最小可用版本，不是完整 agent runtime
+
+当前内置可执行的本地工具：
+
+- `Glob`
+- `Grep`
+- `Find`
+- `Read`
+- `LS`
+- `Copy`
+- `Write`
+- `Edit`
+- `MultiEdit`
+- `Mkdir`
+- `Stat`
+- `Move`
+- `Rename`
+- `Delete`
+- `Bash`
+- `PowerShell`
+
+这些本地工具默认被限制在工作区 [arcee](C:\Users\HUAWEI\Desktop\arcee) 内执行，避免越界读写。
 
 ---
 
@@ -336,7 +380,7 @@ Authorization: Bearer daiju
 2. 执行 `go run .`
 3. 确认 [access_token.json](C:\Users\HUAWEI\Desktop\arcee\access_token.json) 已生成
 4. 执行 `go run . -mode serve`
-5. 将客户端 Base URL 指向 `http://127.0.0.1:8787/v1`
+5. 将客户端 Base URL 指向你的服务器地址，例如 `http://127.0.0.1:8787/v1` 或 `http://服务器IP:8787/v1`
 
 ### 方式二：已有 token 直接起服务
 
@@ -375,6 +419,7 @@ Authorization: Bearer daiju
 - 不要提交 [config.json](C:\Users\HUAWEI\Desktop\arcee\config.json)
 - 不要提交 [access_token.json](C:\Users\HUAWEI\Desktop\arcee\access_token.json)
 - `access_token` 有时效，不是永久凭证
+- 如果监听 `0.0.0.0`，务必配置 `server.openai_api_key`
 - 这套兼容层是实用封装，不是完整协议替身
 
 ---

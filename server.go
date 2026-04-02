@@ -21,11 +21,14 @@ type chatCompletionsRequest struct {
 	Temperature *float64          `json:"temperature,omitempty"`
 	Stream      bool              `json:"stream,omitempty"`
 	Tools       []json.RawMessage `json:"tools,omitempty"`
+	ToolChoice  any               `json:"tool_choice,omitempty"`
 }
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
+	Role       string           `json:"role"`
+	Content    any              `json:"content"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 }
 
 type chatCompletionsResponse struct {
@@ -44,8 +47,9 @@ type chatCompletionChoice struct {
 }
 
 type assistantMessage struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string           `json:"role,omitempty"`
+	Content   string           `json:"content,omitempty"`
+	ToolCalls []openAIToolCall `json:"tool_calls,omitempty"`
 }
 
 func runServer(cfg *appconfig.Config) {
@@ -110,7 +114,7 @@ func handleChatCompletions(cfg appconfig.ServerConfig, accessToken string, clien
 		return
 	}
 
-	prompt := buildPrompt(req.Messages)
+	prompt := buildConversationPrompt(req.Messages)
 	if prompt == "" {
 		http.Error(w, "at least one message with content is required", http.StatusBadRequest)
 		return
@@ -121,15 +125,115 @@ func handleChatCompletions(cfg appconfig.ServerConfig, accessToken string, clien
 		temp = *req.Temperature
 	}
 	modelName := resolveModelName(cfg, req.Model)
+	enabledTools := resolveEnabledTools(cfg, req.Tools)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
+
+	if len(req.Tools) > 0 && !hasToolMessages(req.Messages) {
+		planResult, err := client.CreateChat(ctx, accessToken, arcee.CreateChatRequest{
+			Message:            buildToolPlannerPrompt(req.Messages, req.Tools, req.ToolChoice),
+			Title:              buildTitle(req.Messages),
+			BaseModelName:      modelName,
+			EnabledTools:       enabledTools,
+			FileReferences:     []any{},
+			Temperature:        temp,
+			ProviderPreference: nil,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		planned, err := parsePlannerResponse(planResult.Content)
+		if err == nil && planned.Type == "tool_calls" && len(planned.ToolCalls) > 0 {
+			toolCalls := toOpenAIToolCalls(planned.ToolCalls)
+			if allSupportedLocalTools(toolCalls) {
+				toolMessages, execErr := executeLocalToolCalls(toolCalls)
+				if execErr == nil {
+					followupMessages := appendToolMessages(req.Messages, toolCalls, toolMessages)
+					finalPrompt := buildConversationPrompt(followupMessages)
+					finalResult, finalErr := client.CreateChat(ctx, accessToken, arcee.CreateChatRequest{
+						Message:            finalPrompt,
+						Title:              buildTitle(req.Messages),
+						BaseModelName:      modelName,
+						EnabledTools:       enabledTools,
+						FileReferences:     []any{},
+						Temperature:        temp,
+						ProviderPreference: nil,
+					})
+					if finalErr == nil {
+						if req.Stream {
+							writeStreamResponse(w, modelName, finalResult)
+							return
+						}
+						writeJSON(w, http.StatusOK, chatCompletionsResponse{
+							ID:      "chatcmpl-" + shortID(),
+							Object:  "chat.completion",
+							Created: time.Now().Unix(),
+							Model:   modelName,
+							Choices: []chatCompletionChoice{{
+								Index: 0,
+								Message: assistantMessage{
+									Role:    "assistant",
+									Content: finalResult.Content,
+								},
+								FinishReason: "stop",
+							}},
+						})
+						return
+					}
+				}
+			}
+			if req.Stream {
+				writeToolCallStreamResponse(w, modelName, toolCalls)
+				return
+			}
+			writeJSON(w, http.StatusOK, chatCompletionsResponse{
+				ID:      "chatcmpl-" + shortID(),
+				Object:  "chat.completion",
+				Created: time.Now().Unix(),
+				Model:   modelName,
+				Choices: []chatCompletionChoice{{
+					Index: 0,
+					Message: assistantMessage{
+						Role:      "assistant",
+						ToolCalls: toolCalls,
+					},
+					FinishReason: "tool_calls",
+				}},
+			})
+			return
+		}
+
+		if err == nil && planned.Type == "final" {
+			if req.Stream {
+				writeStreamResponse(w, modelName, &arcee.CreateChatResult{Content: planned.Content})
+				return
+			}
+			writeJSON(w, http.StatusOK, chatCompletionsResponse{
+				ID:      "chatcmpl-" + shortID(),
+				Object:  "chat.completion",
+				Created: time.Now().Unix(),
+				Model:   modelName,
+				Choices: []chatCompletionChoice{{
+					Index: 0,
+					Message: assistantMessage{
+						Role:    "assistant",
+						Content: planned.Content,
+					},
+					FinishReason: "stop",
+				}},
+			})
+			return
+		}
+	}
 
 	result, err := client.CreateChat(ctx, accessToken, arcee.CreateChatRequest{
 		Message:            prompt,
 		Title:              buildTitle(req.Messages),
 		BaseModelName:      modelName,
-		EnabledTools:       resolveEnabledTools(cfg, req.Tools),
+		EnabledTools:       enabledTools,
 		FileReferences:     []any{},
 		Temperature:        temp,
 		ProviderPreference: nil,
@@ -287,6 +391,47 @@ func writeStreamResponse(w http.ResponseWriter, model string, result *arcee.Crea
 			Index:        0,
 			Delta:        assistantMessage{},
 			FinishReason: "stop",
+		}},
+	})
+
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
+func writeToolCallStreamResponse(w http.ResponseWriter, model string, toolCalls []openAIToolCall) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	writeSSE(w, chatCompletionsResponse{
+		ID:      "chatcmpl-" + shortID(),
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []chatCompletionChoice{{
+			Index: 0,
+			Delta: assistantMessage{
+				Role:      "assistant",
+				ToolCalls: toolCalls,
+			},
+		}},
+	})
+
+	writeSSE(w, chatCompletionsResponse{
+		ID:      "chatcmpl-" + shortID(),
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []chatCompletionChoice{{
+			Index:        0,
+			Delta:        assistantMessage{},
+			FinishReason: "tool_calls",
 		}},
 	})
 
