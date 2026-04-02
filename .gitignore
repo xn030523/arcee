@@ -1,0 +1,6 @@
+.gocache/
+config.json
+*.har
+*.exe
+*.test
+*.out
