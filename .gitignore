@@ -1,6 +1,8 @@
 .gocache/
 config.json
+access_token.json
 *.har
 *.exe
 *.test
 *.out
+.gocache
