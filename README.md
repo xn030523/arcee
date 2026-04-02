@@ -160,6 +160,12 @@ go run . -mode serve
 
 配置文件是 [config.json](C:\Users\HUAWEI\Desktop\arcee\config.json)。
 
+首次使用建议先从模板复制：
+
+```powershell
+Copy-Item config.json.ex config.json
+```
+
 ```json
 {
   "mode": "signup",
