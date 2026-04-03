@@ -2,6 +2,10 @@
 
 > 自动注册 Arcee 账号，并将会话能力暴露为 OpenAI 兼容接口。
 
+## 社区友链
+
+- LINUX DO 社区: https://linux.do/
+
 ---
 
 ## 概览
